@@ -1296,7 +1296,87 @@ def render_live_dashboard():
     # VIEW 4: MOBILE VIEW
     # ============================================================================
     elif active_tab == "📱 Mobile View":
-        st.markdown("<h4 style='color: #FFFFFF; font-weight: 800; font-size: 1.2rem;'>📱 Mobile Touch Cards (Auto-Sorted by Highest Conviction)</h4>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color: #FFFFFF; font-weight: 800; font-size: 1.15rem; margin-bottom: 4px;'>📱 Mobile Portfolio Table (DCA Column 3rd)</h4>", unsafe_allow_html=True)
+        st.markdown("<div style='color: #A1A1AA; font-size: 12.5px; margin-bottom: 12px;'>Optimized for mobile screens. Swipe horizontally to view all metrics.</div>", unsafe_allow_html=True)
+
+        # Build Mobile-Optimized Table with DCA strictly in the 3rd column
+        m_rows = []
+        for item in portfolio_data:
+            sc = item["dca_score"]
+            sc_cls = "dca-pill-8" if sc >= 8.0 else ("dca-pill-6" if sc >= 6.0 else ("dca-pill-4" if sc >= 4.5 else "dca-pill-low"))
+
+            td_col = "#00E676" if item["today_chg"] > 0 else ("#FF5252" if item["today_chg"] < 0 else "#FFFFFF")
+            ys_col = "#00E676" if item["yest_chg"] > 0 else ("#FF5252" if item["yest_chg"] < 0 else "#FFFFFF")
+
+            td_str = f"{item['today_chg']:+.1f}%"
+            ys_str = f"{item['yest_chg']:+.1f}%"
+
+            st_text = item["status"]
+            if st_text == "CONFIRMED BUY":
+                st_badge = f'<span class="badge-confirmed">{st_text}</span>'
+            elif st_text == "GHOST CAP":
+                st_badge = f'<span class="badge-ghost">{st_text}</span>'
+            elif st_text == "SCALE IN (SELLING)":
+                st_badge = f'<span class="badge-knife">{st_text}</span>'
+            elif st_text == "VALUE ZONE":
+                st_badge = f'<span class="badge-value">{st_text}</span>'
+            elif st_text == "FAIR VALUE":
+                st_badge = f'<span class="badge-fair">{st_text}</span>'
+            else:
+                st_badge = f'<span class="badge-wait">{st_text}</span>'
+
+            cvd = item["cvd_state"]
+            cvd_badge = f'<span class="cvd-{cvd.lower()}">{cvd}</span>'
+
+            z_val = item["z_score"]
+            z_col = "#00E676" if z_val <= -1.2 else ("#FF5252" if z_val >= 1.2 else "#FFFFFF")
+            z_str = f"{z_val:+.1f} SD"
+
+            rsi_val = item["rsi"]
+            rsi_col = "#00E676" if rsi_val <= 30 else ("#9ae63c" if rsi_val <= 40 else ("#FF5252" if rsi_val >= 70 else "#FFFFFF"))
+
+            p_str = f"${item['price']:,.2f}" if item['price'] >= 100 else f"${item['price']:.2f}"
+
+            # Exact sequence: TICKER, PRICE, DCA (3rd), TODAY 1D, YEST 1D, STATUS, CVD FLOW, Z-SCORE, RSI
+            row_html = (
+                f'<tr>'
+                f'<td style="font-weight: 800; color: #FFFFFF; font-size: 14px; position: sticky; left: 0; background-color: #121214; z-index: 2;">{item["display"]}</td>'
+                f'<td style="font-weight: 700; color: #FFFFFF;">{p_str}</td>'
+                f'<td style="text-align: center;"><span class="{sc_cls}">{sc:.1f}</span></td>'
+                f'<td style="font-weight: 800; color: {td_col};">{td_str}</td>'
+                f'<td style="font-weight: 800; color: {ys_col};">{ys_str}</td>'
+                f'<td style="text-align: center;">{st_badge}</td>'
+                f'<td>{cvd_badge}</td>'
+                f'<td style="font-weight: 700; color: {z_col};">{z_str}</td>'
+                f'<td style="font-weight: 700; color: {rsi_col};">{rsi_val:.1f}</td>'
+                f'</tr>'
+            )
+            m_rows.append(row_html)
+
+        m_body_html = "".join(m_rows)
+        m_full_table = (
+            f'<div class="tid-table-wrapper" style="overflow-x: auto; margin-bottom: 24px;">'
+            f'<table class="tid-table" style="min-width: 680px;">'
+            f'<thead>'
+            f'<tr>'
+            f'<th style="position: sticky; left: 0; background-color: #161618; z-index: 3;">TICKER</th>'
+            f'<th>PRICE</th>'
+            f'<th style="text-align: center; color: #00E676;">DCA</th>'
+            f'<th>TODAY 1D</th>'
+            f'<th>YEST 1D</th>'
+            f'<th style="text-align: center;">STATUS</th>'
+            f'<th>CVD FLOW</th>'
+            f'<th>Z-SCORE</th>'
+            f'<th>RSI</th>'
+            f'</tr>'
+            f'</thead>'
+            f'<tbody>{m_body_html}</tbody>'
+            f'</table>'
+            f'</div>'
+        )
+        st.markdown(m_full_table, unsafe_allow_html=True)
+
+        st.markdown("<h4 style='color: #FFFFFF; font-weight: 800; font-size: 1.15rem; margin-top: 16px; margin-bottom: 12px;'>📱 Quick Touch Cards</h4>", unsafe_allow_html=True)
 
         for item in portfolio_data:
             sc = item["dca_score"]
@@ -1322,25 +1402,27 @@ def render_live_dashboard():
             cvd = item["cvd_state"]
             cvd_badge = f'<span class="cvd-{cvd.lower()}">{cvd}</span>'
 
+            # 3-item top bar: Ticker (1st), Price (2nd), DCA (3rd)
             st.markdown(f"""
-            <div style="background-color: #121214; border: 1.5px solid #27272A; border-radius: 8px; padding: 16px 18px; margin-bottom: 14px;">
-                <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
+            <div style="background-color: #121214; border: 1.5px solid #27272A; border-radius: 8px; padding: 14px 16px; margin-bottom: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; border-bottom: 1px solid #1E1E22; padding-bottom: 8px;">
                     <div>
-                        <span style="font-size: 20px; font-weight: 800; color: #FFFFFF;">{item['display']}</span>
-                        <span style="font-size: 12px; color: #A1A1AA; margin-left: 6px;">{item['name']}</span>
+                        <span style="font-size: 19px; font-weight: 800; color: #FFFFFF;">{item['display']}</span>
+                        <span style="font-size: 11.5px; color: #A1A1AA; margin-left: 4px;">{item['name']}</span>
                     </div>
-                    <div style="font-size: 19px; font-weight: 800; color: #FFFFFF;">${item['price']:,.2f}</div>
+                    <div style="font-size: 18px; font-weight: 800; color: #FFFFFF;">${item['price']:,.2f}</div>
+                    <div><span class="{sc_cls}" style="font-size: 13.5px; font-weight: 900; padding: 4px 10px;">DCA {sc:.1f}</span></div>
                 </div>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                     <div>{st_badge}</div>
-                    <div>DCA Score: <span class="{sc_cls}">{sc:.1f}</span></div>
+                    <div>{cvd_badge}</div>
                 </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; background-color: #080808; padding: 12px 14px; border-radius: 6px; font-size: 13.5px; border: 1px solid #1E1E22;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; background-color: #080808; padding: 10px 12px; border-radius: 6px; font-size: 13px; border: 1px solid #1E1E22;">
                     <div>Today 1D: <strong style="color: {td_col};">{item['today_chg']:+.1f}%</strong></div>
                     <div>Yest 1D: <strong style="color: {ys_col};">{item['yest_chg']:+.1f}%</strong></div>
                     <div>Z-Score: <strong>{item['z_score']:+.1f} SD</strong></div>
                     <div>RSI 14: <strong>{item['rsi']:.1f}</strong></div>
-                    <div style="grid-column: span 2;">CVD Flow: {cvd_badge} &nbsp;|&nbsp; Vol: <strong style="color: #FFFFFF;">{item['vol_state']}</strong></div>
+                    <div style="grid-column: span 2;">Vol Regime: <strong style="color: #FFFFFF;">{item['vol_state']}</strong></div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
