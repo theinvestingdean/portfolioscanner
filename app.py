@@ -848,43 +848,8 @@ def render_live_dashboard():
     # VIEW 3: TRADINGVIEW ALERT LOG & WEBHOOK SETUP
     # ============================================================================
     elif active_tab == "🔔 Optimised Trend Alert Log":
-        st.markdown("<h4 style='color: #FFFFFF; font-weight: 800; font-size: 1.2rem;'>TID - Optimised Trend Live Webhook Alert Stream</h4>", unsafe_allow_html=True)
-        st.markdown("<div style='color: #A1A1AA; font-size: 13px; margin-bottom: 16px;'>This table displays real signals transmitted from your live TradingView alerts. (Any test signals used during setup have been cleared).</div>", unsafe_allow_html=True)
-
-        col_w1, col_w2 = st.columns([2, 1])
-        with col_w1:
-            st.markdown("""
-            <div class="tid-card">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-weight: 800; color: #FFFFFF;">📡 Webhook Listener Endpoint:</span>
-                    <span style="background-color: #18181B; color: #00E676; padding: 5px 12px; border-radius: 4px; font-family: monospace; font-size: 13.5px; border: 1px solid #27272A;">
-                        http://localhost:8000/webhook
-                    </span>
-                </div>
-                <div style="font-size: 12.5px; color: #A1A1AA; margin-top: 8px;">
-                    TradingView will send live alerts from <strong>TID - Optimised Trend v1.1</strong> and <strong>IA13 Master Scanner</strong> directly to this endpoint.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col_w2:
-            st.markdown("""
-            <div class="tid-card">
-                <div style="font-weight: 800; color: #FFFFFF; margin-bottom: 8px;">🧪 Webhook Test Simulator</div>
-            """, unsafe_allow_html=True)
-            if st.button("Send Test Alert (NVDA)", use_container_width=True):
-                log_alert(
-                    ticker="NVDA", 
-                    signal_type="CONFIRMED BUY", 
-                    price=204.64, 
-                    timeframe="1D", 
-                    raw_message="TID Confirmed Reversal BUY on NASDAQ:NVDA (1D)", 
-                    action="BUY"
-                )
-                st.success("Test alert logged to database!")
-                time.sleep(0.5)
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color: #FFFFFF; font-weight: 800; font-size: 1.2rem; margin-bottom: 8px;'>🔔 Live Signal Stream (TID - Optimised Trend)</h4>", unsafe_allow_html=True)
+        st.markdown("<div style='color: #A1A1AA; font-size: 13px; margin-bottom: 16px;'>Live buy/sell reversal and capitulation alerts transmitted automatically from your TradingView charts.</div>", unsafe_allow_html=True)
 
         # Filter alerts
         alphabetical_tickers = sorted(list(set([t["display"] for t in portfolio_data])))
