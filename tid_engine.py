@@ -9,8 +9,15 @@ Translates exact Pine Script algorithms from:
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from typing import Dict, List, Any, Optional
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from typing import Dict, List, Any, Optional, Tuple
+
+UK_TZ = ZoneInfo("Europe/London")
+
+def get_uk_now_str() -> str:
+    """Returns current UK date/time string with automatic GMT/BST label."""
+    return datetime.now(UK_TZ).strftime("%d %b, %H:%M:%S %Z")
 
 # 17-Stock Portfolio Watchlist Configuration
 PORTFOLIO_TICKERS = [
@@ -237,12 +244,142 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
+NY_TZ = ZoneInfo("America/New_York")
+
+
+def _resolve_uk_signal_time(
+    df_daily: pd.DataFrame,
+    df_intra: Optional[pd.DataFrame],
+    target_ts: pd.Timestamp,
+    sig_type: str = "GHOST",
+    market: str = "NASDAQ"
+) -> Tuple[float, str, str]:
+    """
+    Pinpoints the exact UK timezone (GMT/BST) date & time when a daily Ghost Cap
+    or Confirmed Buy flashed by scanning 15-minute intraday candles on that date.
+    Returns (sort_epoch, short_uk_str, full_uk_str).
+    """
+    target_date = target_ts.date()
+    exch_tz = UK_TZ if market == "LSE" else NY_TZ
+
+    if df_intra is not None and not df_intra.empty:
+        try:
+            intra_idx = df_intra.index
+            if intra_idx.tz is None:
+                intra_local = df_intra.tz_localize("UTC").tz_convert(exch_tz)
+            else:
+                intra_local = df_intra.tz_convert(exch_tz)
+
+            day_bars = intra_local[intra_local.index.date == target_date]
+            if not day_bars.empty:
+                loc = df_daily.index.get_loc(target_ts)
+                if isinstance(loc, int) and loc >= 49:
+                    prev_closes = df_daily["Close"].iloc[loc - 49:loc].values
+                    prev_c = float(df_daily["Close"].iloc[loc - 1])
+
+                    c_hist = df_daily["Close"].iloc[:loc]
+                    delta = c_hist.diff()
+                    g = delta.clip(lower=0)
+                    ls = -delta.clip(upper=0)
+                    ag14_prev = float(g.ewm(alpha=1/14, min_periods=14, adjust=False).mean().iloc[-1])
+                    al14_prev = float(ls.ewm(alpha=1/14, min_periods=14, adjust=False).mean().iloc[-1])
+                    ag5_prev = float(g.ewm(alpha=1/5, min_periods=5, adjust=False).mean().iloc[-1])
+                    al5_prev = float(ls.ewm(alpha=1/5, min_periods=5, adjust=False).mean().iloc[-1])
+
+                    open_d = float(day_bars["Open"].iloc[0])
+                    run_h = -1e18
+                    run_l = 1e18
+
+                    if sig_type == "GHOST":
+                        for ts, row in day_bars.iterrows():
+                            bh, bl, bc = float(row["High"]), float(row["Low"]), float(row["Close"])
+                            if np.isnan(bc):
+                                continue
+                            run_h = max(run_h, bh)
+                            run_l = min(run_l, bl)
+
+                            c50 = np.append(prev_closes, bc)
+                            sma50 = float(np.mean(c50))
+                            std50 = float(np.std(c50, ddof=0))
+                            if std50 <= 0:
+                                continue
+                            conf_lower = sma50 - 2.2 * std50
+                            z_low = (run_l - sma50) / std50
+
+                            chg = bc - prev_c
+                            gn = max(chg, 0.0)
+                            lo = max(-chg, 0.0)
+                            ag14 = (ag14_prev * 13.0 + gn) / 14.0
+                            al14 = (al14_prev * 13.0 + lo) / 14.0
+                            rsi14 = 100.0 if al14 == 0 else (100.0 - 100.0 / (1.0 + ag14 / al14))
+
+                            ag5 = (ag5_prev * 4.0 + gn) / 5.0
+                            al5 = (al5_prev * 4.0 + lo) / 5.0
+                            rsi5 = 100.0 if al5 == 0 else (100.0 - 100.0 / (1.0 + ag5 / al5))
+
+                            rng = max(run_h - run_l, 1e-6)
+                            lower_wick = (bc - run_l) / rng
+
+                            if (run_l <= conf_lower or z_low <= -2.2 * 0.88) and (rsi14 <= 42.0 or rsi5 <= 30.0) and (bc <= open_d or lower_wick >= 0.45):
+                                uk_dt = ts.tz_convert(UK_TZ)
+                                return (
+                                    uk_dt.timestamp(),
+                                    uk_dt.strftime("%d %b, %H:%M %Z"),
+                                    uk_dt.strftime("%d %b %Y, %H:%M %Z"),
+                                )
+
+                if sig_type == "CONFIRMED":
+                    # Confirmed Buy locks on session bar close (or latest 15m bar if session still live)
+                    last_bar_end = day_bars.index[-1] + pd.Timedelta(minutes=15)
+                    now_uk = pd.Timestamp.now(tz=UK_TZ)
+                    uk_dt = last_bar_end.tz_convert(UK_TZ)
+                    if uk_dt > now_uk:
+                        uk_dt = day_bars.index[-1].tz_convert(UK_TZ)
+                    return (
+                        uk_dt.timestamp(),
+                        uk_dt.strftime("%d %b, %H:%M %Z"),
+                        uk_dt.strftime("%d %b %Y, %H:%M %Z"),
+                    )
+
+                # Fallback for Ghost Cap within 60d window: exact time of session low
+                min_ts = day_bars["Low"].idxmin()
+                uk_dt = min_ts.tz_convert(UK_TZ)
+                return (
+                    uk_dt.timestamp(),
+                    uk_dt.strftime("%d %b, %H:%M %Z"),
+                    uk_dt.strftime("%d %b %Y, %H:%M %Z"),
+                )
+        except Exception:
+            pass
+
+    # Fallback for signals > 60 days old (beyond 15m intraday retention): exchange close in UK time
+    close_hm = (16, 30) if market == "LSE" else (16, 0)
+    local_close = datetime(
+        target_date.year, target_date.month, target_date.day,
+        close_hm[0], close_hm[1], tzinfo=exch_tz
+    )
+    uk_close = local_close.astimezone(UK_TZ)
+    return (
+        uk_close.timestamp(),
+        target_ts.strftime("%d %b %Y"),
+        f"{target_ts.strftime('%d %b %Y')} ({uk_close.strftime('%H:%M %Z')} Close)",
+    )
+
+
 def fetch_portfolio_data() -> List[Dict[str, Any]]:
-    """Fetches and computes full metrics for all 17 portfolio tickers."""
+    """Fetches and computes full metrics for all 17 portfolio tickers, including UK signal timestamps."""
     symbols = [t["symbol"] for t in PORTFOLIO_TICKERS]
     
-    # Download 1y batch data
+    # Download 1y daily batch data
     batch = yf.download(symbols, period="1y", group_by="ticker", threads=True, progress=False)
+
+    # Download 60d 15m intraday batch data to pinpoint exact UK time of Ghost Cap / Confirmed Buy flashes
+    intra_batch = None
+    try:
+        intra_batch = yf.download(symbols, period="60d", interval="15m", group_by="ticker", threads=True, progress=False)
+    except Exception:
+        intra_batch = None
     
     results = []
     
@@ -256,6 +393,16 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
             
             if df.empty or len(df) < 15:
                 continue
+
+            df_intra = None
+            if intra_batch is not None:
+                try:
+                    if len(symbols) > 1 and sym in intra_batch:
+                        df_intra = intra_batch[sym].dropna(how="all")
+                    elif len(symbols) == 1:
+                        df_intra = intra_batch.dropna(how="all")
+                except Exception:
+                    df_intra = None
                 
             df = compute_technical_indicators(df)
             
@@ -285,7 +432,7 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
             dca_score = round((sz * 0.40) + (sr * 0.30) + (ssma * 0.30), 1)
             dca_score = max(1.0, min(10.0, dca_score))
             
-            # CVD Order Flow 4-state engine
+            # CVD Order Flow 4-state engine (1D Daily timeframe)
             rcvd = last["rCVD"]
             cvd_sig = last["CVDSig"]
             cvd_slope = last["CVDSlope"]
@@ -331,6 +478,59 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
                 status = "FAIR VALUE"
             else:
                 status = "WAIT"
+
+            # Resolve latest Ghost Cap flash date & UK time, plus historical signal events
+            ghost_rows = df[df["GhostBuy"]]
+            if not ghost_rows.empty:
+                last_gb_ts = ghost_rows.index[-1]
+                _, last_ghost_short, last_ghost_full = _resolve_uk_signal_time(
+                    df, df_intra, last_gb_ts, sig_type="GHOST", market=item["market"]
+                )
+                last_ghost_days_ago = (df.index[-1].date() - last_gb_ts.date()).days
+            else:
+                last_ghost_short = "—"
+                last_ghost_full = "No Ghost Cap (1Y)"
+                last_ghost_days_ago = 9999
+
+            # Collect Confirmed Buy & Ghost Cap events across the 1Y window for the Optimised Trend Alert Log
+            signal_events = []
+            sig_mask = df["ConfBuy"] | df["GhostBuy"]
+            for sig_ts, srow in df[sig_mask].iterrows():
+                is_conf = bool(srow["ConfBuy"])
+                stype = "CONFIRMED BUY" if is_conf else "GHOST CAP"
+                s_mode = "CONFIRMED" if is_conf else "GHOST"
+                sort_ep, uk_short, uk_full = _resolve_uk_signal_time(
+                    df, df_intra, sig_ts, sig_type=s_mode, market=item["market"]
+                )
+                sig_px = float(srow["Close"])
+                sig_z = float(srow["ZScore"]) if not np.isnan(srow["ZScore"]) else 0.0
+                sig_rsi = float(srow["RSI14"]) if not np.isnan(srow["RSI14"]) else 50.0
+                ret_pct = ((price - sig_px) / sig_px) * 100.0 if sig_px > 0 else 0.0
+                if is_conf:
+                    action_lbl = "PRIMARY BUY"
+                    summary_msg = f"Confirmed reversal bounce ({sig_z:+.1f} SD | RSI {sig_rsi:.1f})"
+                else:
+                    action_lbl = "SCALE IN"
+                    summary_msg = f"Pierced -2.2 Std. Dev. band ({sig_z:+.1f} SD | RSI {sig_rsi:.1f})"
+
+                signal_events.append({
+                    "sort_ts": sort_ep,
+                    "date_key": sig_ts.strftime("%Y-%m-%d"),
+                    "timestamp_uk": uk_full,
+                    "timestamp_short": uk_short,
+                    "ticker": item["display"],
+                    "name": item["name"],
+                    "signal_type": stype,
+                    "action": action_lbl,
+                    "price": sig_px,
+                    "current_price": price,
+                    "return_pct": ret_pct,
+                    "std_dev": sig_z,
+                    "rsi": sig_rsi,
+                    "timeframe": "1D",
+                    "raw_message": summary_msg,
+                    "is_active_bar": bool(sig_ts == df.index[-1]),
+                })
                 
             # DCA Strategy Banner Text (from Beginner's Guide v2.0)
             if knife_active:
@@ -406,6 +606,10 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
                 "conf_buy": conf_buy,
                 "ghost_buy": ghost_buy,
                 "knife_active": knife_active,
+                "last_ghost_short": last_ghost_short,
+                "last_ghost_full": last_ghost_full,
+                "last_ghost_days_ago": last_ghost_days_ago,
+                "signal_events": signal_events,
                 "df": df  # Keep for plotting detailed charts
             })
         except Exception as e:
@@ -415,6 +619,85 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
     # Auto-sort descending by DCA Score (secondary tie-break: deeper negative Z-score)
     results.sort(key=lambda x: (x["dca_score"], -x["z_score"]), reverse=True)
     return results
+
+
+def build_optimised_trend_signal_log(
+    portfolio_data: List[Dict[str, Any]],
+    webhook_alerts: Optional[List[Dict[str, Any]]] = None,
+    ticker_filter: Optional[str] = None,
+    signal_filter: str = "ALL",
+    limit: int = 100
+) -> List[Dict[str, Any]]:
+    """
+    Combines automatically detected Confirmed Buy & Ghost Cap signals across all 17 stocks
+    with any logged TradingView webhook alerts, formatted in UK Time (Europe/London)
+    and sorted newest-first.
+    """
+    combined: List[Dict[str, Any]] = []
+    seen_keys = set()
+
+    for item in portfolio_data:
+        for ev in item.get("signal_events", []):
+            key = (ev["ticker"], ev["date_key"], ev["signal_type"])
+            seen_keys.add(key)
+            combined.append(ev)
+
+    # Also merge any custom incoming webhook alerts from SQLite
+    if webhook_alerts:
+        price_lookup = {x["display"]: x["price"] for x in portfolio_data}
+        name_lookup = {x["display"]: x["name"] for x in portfolio_data}
+        for wa in webhook_alerts:
+            tkr = str(wa.get("ticker", "")).upper()
+            stype = str(wa.get("signal_type", "ALERT")).upper()
+            raw_ts = str(wa.get("timestamp", ""))
+            try:
+                dt_utc = datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                dt_uk = dt_utc.astimezone(UK_TZ)
+                date_key = dt_uk.strftime("%Y-%m-%d")
+                uk_full = dt_uk.strftime("%d %b %Y, %H:%M %Z")
+                sort_ep = dt_uk.timestamp()
+            except Exception:
+                date_key = raw_ts[:10]
+                uk_full = raw_ts
+                sort_ep = 0.0
+
+            key = (tkr, date_key, stype)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            sig_px = float(wa["price"]) if wa.get("price") is not None else 0.0
+            cur_px = price_lookup.get(tkr, sig_px)
+            ret_pct = ((cur_px - sig_px) / sig_px) * 100.0 if sig_px > 0 and cur_px > 0 else 0.0
+            combined.append({
+                "sort_ts": sort_ep,
+                "date_key": date_key,
+                "timestamp_uk": uk_full,
+                "timestamp_short": uk_full,
+                "ticker": tkr,
+                "name": name_lookup.get(tkr, tkr),
+                "signal_type": stype,
+                "action": str(wa.get("action", "BUY")).upper(),
+                "price": sig_px,
+                "current_price": cur_px,
+                "return_pct": ret_pct,
+                "std_dev": None,
+                "rsi": None,
+                "timeframe": str(wa.get("timeframe", "1D")),
+                "raw_message": str(wa.get("raw_message", "")),
+                "is_active_bar": False,
+            })
+
+    if ticker_filter and ticker_filter != "ALL":
+        combined = [x for x in combined if x["ticker"] == ticker_filter]
+
+    if signal_filter == "CONFIRMED BUY":
+        combined = [x for x in combined if x["signal_type"] == "CONFIRMED BUY"]
+    elif signal_filter == "GHOST CAP":
+        combined = [x for x in combined if x["signal_type"] == "GHOST CAP"]
+
+    combined.sort(key=lambda x: (x["sort_ts"], 1 if x["signal_type"] == "CONFIRMED BUY" else 0), reverse=True)
+    return combined[:limit]
 
 def fetch_single_asset_detail(symbol: str, period: str = "1y", interval: str = "1d") -> Optional[Dict[str, Any]]:
     """Fetches high-detail data for a single asset, including analyst upside and full candle history."""

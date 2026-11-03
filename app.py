@@ -25,7 +25,9 @@ import time
 from tid_engine import (
     PORTFOLIO_TICKERS, 
     fetch_portfolio_data, 
-    fetch_single_asset_detail
+    fetch_single_asset_detail,
+    get_uk_now_str,
+    build_optimised_trend_signal_log
 )
 from db import (
     log_alert, 
@@ -340,19 +342,20 @@ st.markdown("""
         background-color: #1F1F24 !important;
         color: #FACC15 !important; /* Gold header text */
         font-weight: 800;
-        font-size: 12.5px;
-        letter-spacing: 0.8px;
-        padding: 13px 16px;
+        font-size: 12px;
+        letter-spacing: 0.6px;
+        padding: 11px 12px;
         border: 1.5px solid #4B5563 !important; /* High-contrast cell border */
         border-bottom: 2.5px solid #FACC15 !important;
         text-align: left;
         white-space: nowrap;
     }
     .tid-table td {
-        padding: 12px 16px;
+        padding: 10px 12px;
         border: 1.5px solid #4B5563 !important; /* High-contrast cell border between every row & column */
         white-space: nowrap;
         font-weight: 600;
+        font-size: 13px;
     }
     /* Alternating High-Contrast Zebra Striping for Easy Row-by-Row Tracking */
     .tid-table tr:nth-child(even) td {
@@ -598,7 +601,7 @@ st.markdown("""
 # ============================================================================
 @st.fragment(run_every='180s')
 def render_live_dashboard():
-    now_str = datetime.utcnow().strftime("%b %d, %H:%M:%S UTC")
+    now_str = get_uk_now_str()
     st_col1, st_col2 = st.columns([3, 2])
 
     with st_col1:
@@ -607,7 +610,7 @@ def render_live_dashboard():
             <span class="badge-yellow">EQUITIES & STOCKS</span>
             <span class="badge-dark-pill">17 ASSETS</span>
             <span class="badge-yellow">SNAPSHOT</span>
-            <span class="badge-dark-pill">{now_str} (Live Sync)</span>
+            <span class="badge-dark-pill">{now_str} (UK Time • Live Sync)</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -617,8 +620,8 @@ def render_live_dashboard():
             <span class="badge-dark-pill" style="border-color: #00E676; color: #00E676;">
                 <span style="font-size: 13px;">\u25cf</span> Auto-Refresh: 3 Min (Active)
             </span>
-            <span class="badge-dark-pill" style="border-color: #00E676;">
-                <span style="color: #00E676; font-size: 13px;">\u25cf</span> Webhook: Port 8000 (Active)
+            <span class="badge-dark-pill" style="border-color: #00E676; color: #00E676;">
+                <span style="font-size: 13px;">\u25cf</span> 1D Engine &amp; Signal Log (Active)
             </span>
         </div>
         """, unsafe_allow_html=True)
@@ -661,7 +664,7 @@ def render_live_dashboard():
     # VIEW 1: 17-STOCK MASTER SCANNER
     # ============================================================================
     if active_tab == "📊 17-Stock Master Scanner":
-        col_main, col_side = st.columns([6.4, 3.6])
+        col_main, col_side = st.columns([6.7, 3.3])
 
         with col_main:
             active_filter = st.session_state.filter_status
@@ -670,7 +673,22 @@ def render_live_dashboard():
             else:
                 display_data = portfolio_data
 
-            # Filter Banner Header
+            # Top Header + Branded Yellow Refresh Button ABOVE the Watchlist Table
+            c_hdr1, c_hdr2 = st.columns([7.2, 2.8])
+            with c_hdr1:
+                st.markdown(
+                    "<div style='margin-bottom: 10px;'>"
+                    "<h4 style='margin: 0; color: #FFFFFF; font-weight: 800; font-size: 1.2rem;'>Portfolio Watchlist (Auto-Sorted by Highest DCA Score)</h4>"
+                    "<div style='color: #A1A1AA; font-size: 12px; margin-top: 3px;'>Auto-syncs live every 3 minutes • All signal timestamps in UK Time (GMT/BST)</div>"
+                    "</div>",
+                    unsafe_allow_html=True
+                )
+            with c_hdr2:
+                if st.button("🔄 Refresh Market Data", use_container_width=True):
+                    st.cache_data.clear()
+                    st.rerun()
+
+            # Filter Banner Header (if filtered via Portfolio Summary)
             if active_filter != "ALL":
                 c_f_info, c_f_btn = st.columns([4, 1.5])
                 with c_f_info:
@@ -684,8 +702,6 @@ def render_live_dashboard():
                     if st.button("✕ Show All 17", key="btn_clear_filter", use_container_width=True):
                         st.session_state.filter_status = "ALL"
                         st.rerun()
-            else:
-                st.markdown("<h4 style='margin-bottom: 14px; color: #FFFFFF; font-weight: 800; font-size: 1.2rem;'>Portfolio Watchlist (Auto-Sorted by Highest DCA Score)</h4>", unsafe_allow_html=True)
 
             # Build clean, zero-indent HTML table rows with cell borders & zebra striping
             rows = []
@@ -724,17 +740,29 @@ def render_live_dashboard():
 
                 p_str = f"${item['price']:,.2f}" if item['price'] >= 100 else f"${item['price']:.2f}"
 
+                # Ghost Cap flash date & UK time styling
+                gb_short = item.get("last_ghost_short", "—")
+                gb_days = item.get("last_ghost_days_ago", 9999)
+                if item.get("ghost_buy"):
+                    gb_cell = f'<span style="color: #FF8C00; font-weight: 800;">⚡ {gb_short}</span>'
+                elif gb_days <= 14:
+                    gb_cell = f'<span style="color: #E4E4E7; font-weight: 600;">{gb_short}</span>'
+                else:
+                    gb_cell = f'<span style="color: #9CA3AF; font-weight: 500;">{gb_short}</span>'
+
+                # Column order: TICKER, PRICE, DCA (3rd), TODAY 1D, YEST 1D, Std. Dev., RSI, CVD FLOW (1D), STATUS, GHOST CAP (UK)
                 row_html = (
                     f'<tr>'
-                    f'<td style="font-weight: 800; color: #FFFFFF; font-size: 14.5px;">{item["display"]}</td>'
+                    f'<td style="font-weight: 800; color: #FFFFFF; font-size: 14px;">{item["display"]}</td>'
                     f'<td style="font-weight: 700; color: #FFFFFF;">{p_str}</td>'
+                    f'<td style="text-align: center;"><span class="{sc_cls}">{sc:.1f}</span></td>'
                     f'<td style="font-weight: 800; color: {td_col};">{td_str}</td>'
                     f'<td style="font-weight: 800; color: {ys_col};">{ys_str}</td>'
-                    f'<td style="text-align: center;"><span class="{sc_cls}">{sc:.1f}</span></td>'
                     f'<td style="font-weight: 700; color: {z_col};">{z_str}</td>'
                     f'<td style="font-weight: 700; color: {rsi_col};">{rsi_val:.1f}</td>'
                     f'<td>{cvd_badge}</td>'
                     f'<td style="text-align: center;">{st_badge}</td>'
+                    f'<td style="font-size: 12.5px;">{gb_cell}</td>'
                     f'</tr>'
                 )
                 rows.append(row_html)
@@ -747,13 +775,14 @@ def render_live_dashboard():
                 f'<tr>'
                 f'<th>TICKER</th>'
                 f'<th>PRICE</th>'
+                f'<th style="text-align: center;">DCA</th>'
                 f'<th>TODAY 1D</th>'
                 f'<th>YEST 1D</th>'
-                f'<th style="text-align: center;">DCA</th>'
-                f'<th>Z-SCORE</th>'
+                f'<th>Std. Dev.</th>'
                 f'<th>RSI</th>'
-                f'<th>CVD ORDER FLOW</th>'
+                f'<th>CVD FLOW (1D)</th>'
                 f'<th style="text-align: center;">STATUS</th>'
+                f'<th>GHOST CAP (UK)</th>'
                 f'</tr>'
                 f'</thead>'
                 f'<tbody>{body_html}</tbody>'
@@ -762,15 +791,6 @@ def render_live_dashboard():
             )
 
             st.markdown(full_table_html, unsafe_allow_html=True)
-
-            # Branded Yellow Refresh Button
-            c_btn1, c_btn2 = st.columns([2.5, 7.5])
-            with c_btn1:
-                if st.button("🔄 Refresh Market Data", use_container_width=True):
-                    st.cache_data.clear()
-                    st.rerun()
-            with c_btn2:
-                st.markdown("<div style='color: #A1A1AA; font-size: 12.5px; padding-top: 10px;'>Auto-syncs live every 3 minutes. Click 'Refresh Market Data' anytime to force an instant update. Auto-sort prioritizes highest statistical DCA value.</div>", unsafe_allow_html=True)
 
         with col_side:
             # INTERACTIVE CLICKABLE PORTFOLIO SUMMARY FILTERS
@@ -823,7 +843,7 @@ def render_live_dashboard():
                 </div>
                 <div class="guide-row">
                     <span class="badge-ghost">GHOST CAP</span>
-                    <span class="guide-text">Pierced -2.2 Sigma. Extreme capitulation scale-in.</span>
+                    <span class="guide-text">Pierced -2.2 Std. Dev. Extreme capitulation scale-in.</span>
                 </div>
                 <div class="guide-row">
                     <span class="badge-knife">SCALE IN (SELLING)</span>
@@ -831,7 +851,7 @@ def render_live_dashboard():
                 </div>
                 <div class="guide-row">
                     <span class="badge-value">VALUE ZONE</span>
-                    <span class="guide-text">DCA Score 8-10 & Z &lt; -1.2. Prime accumulation.</span>
+                    <span class="guide-text">DCA Score 8-10 &amp; Std. Dev. &lt; -1.2. Prime accumulation.</span>
                 </div>
                 <div class="guide-row">
                     <span class="badge-fair">FAIR VALUE</span>
@@ -839,37 +859,89 @@ def render_live_dashboard():
                 </div>
                 <div class="guide-row" style="border-bottom: none;">
                     <span class="badge-wait">WAIT</span>
-                    <span class="guide-text">DCA Score &lt; 6 or Z &gt; 0. Overextended. Hold capital.</span>
+                    <span class="guide-text">DCA Score &lt; 6 or Std. Dev. &gt; 0. Overextended. Hold.</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
     # ============================================================================
-    # VIEW 3: TRADINGVIEW ALERT LOG & WEBHOOK SETUP
+    # VIEW 2: OPTIMISED TREND ALERT LOG (AUTO-DETECTED + WEBHOOK STREAM)
     # ============================================================================
     elif active_tab == "🔔 Optimised Trend Alert Log":
-        st.markdown("<h4 style='color: #FFFFFF; font-weight: 800; font-size: 1.2rem; margin-bottom: 8px;'>🔔 Live Signal Stream (TID - Optimised Trend)</h4>", unsafe_allow_html=True)
-        st.markdown("<div style='color: #A1A1AA; font-size: 13px; margin-bottom: 16px;'>Live buy/sell reversal and capitulation alerts transmitted automatically from your TradingView charts.</div>", unsafe_allow_html=True)
+        c_al_hdr1, c_al_hdr2 = st.columns([7.8, 2.2])
+        with c_al_hdr1:
+            st.markdown(
+                "<h4 style='color: #FFFFFF; font-weight: 800; font-size: 1.2rem; margin: 0;'>🔔 Optimised Trend Signal &amp; Alert Log (UK Time)</h4>"
+                "<div style='color: #A1A1AA; font-size: 13px; margin-top: 4px; margin-bottom: 14px;'>"
+                "Automatically detects and logs every <strong>Confirmed Buy</strong> reversal and <strong>Ghost Capitulation</strong> flash across all 17 portfolio assets in UK Time (GMT/BST)."
+                "</div>",
+                unsafe_allow_html=True
+            )
+        with c_al_hdr2:
+            if st.button("🔄 Refresh Signals", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
 
-        # Filter alerts
-        alphabetical_tickers = sorted(list(set([t["display"] for t in portfolio_data])))
-        filter_ticker = st.selectbox("Filter Alert Feed by Ticker (A-Z):", options=["ALL"] + alphabetical_tickers)
-        recent_alerts = get_recent_alerts(limit=50, ticker=None if filter_ticker == "ALL" else filter_ticker)
+        # Filters: Signal Type + Ticker (A-Z)
+        f_col1, f_col2 = st.columns([1, 1])
+        with f_col1:
+            sig_type_choice = st.selectbox(
+                "Filter by Signal Type:",
+                options=["ALL SIGNALS (Confirmed + Ghost Cap)", "CONFIRMED BUY ONLY", "GHOST CAP ONLY"]
+            )
+        with f_col2:
+            alphabetical_tickers = sorted(list(set([t["display"] for t in portfolio_data])))
+            filter_ticker = st.selectbox("Filter by Ticker (A-Z):", options=["ALL"] + alphabetical_tickers)
 
-        if recent_alerts:
+        if sig_type_choice == "CONFIRMED BUY ONLY":
+            sig_filter_arg = "CONFIRMED BUY"
+        elif sig_type_choice == "GHOST CAP ONLY":
+            sig_filter_arg = "GHOST CAP"
+        else:
+            sig_filter_arg = "ALL"
+
+        webhook_rows = get_recent_alerts(limit=50, ticker=None if filter_ticker == "ALL" else filter_ticker)
+        signal_log = build_optimised_trend_signal_log(
+            portfolio_data=portfolio_data,
+            webhook_alerts=webhook_rows,
+            ticker_filter=filter_ticker,
+            signal_filter=sig_filter_arg,
+            limit=100
+        )
+
+        if signal_log:
             rows = []
-            for a in recent_alerts:
-                px_val = f"${a['price']:.2f}" if a["price"] else "N/A"
-                sig_col = "#00E676" if "BUY" in a["signal_type"] else ("#FF8C00" if "GHOST" in a["signal_type"] else "#FFFFFF")
+            for a in signal_log:
+                px_val = f"${a['price']:,.2f}" if a["price"] >= 100 else (f"${a['price']:.2f}" if a["price"] else "N/A")
+                cur_val = f"${a['current_price']:,.2f}" if a["current_price"] >= 100 else f"${a['current_price']:.2f}"
+                ret_pct = a.get("return_pct", 0.0)
+                ret_col = "#00E676" if ret_pct > 0 else ("#FF5252" if ret_pct < 0 else "#A1A1AA")
+                ret_str = "ACTIVE BAR" if a.get("is_active_bar") else f"{ret_pct:+.1f}% ({cur_val})"
+                if a.get("is_active_bar"):
+                    ret_col = "#FACC15"
+
+                stype = a["signal_type"]
+                if "CONFIRMED BUY" in stype:
+                    sig_badge = '<span class="badge-confirmed">CONFIRMED BUY</span>'
+                    act_col = "#00E676"
+                elif "GHOST" in stype:
+                    sig_badge = '<span class="badge-ghost">GHOST CAP</span>'
+                    act_col = "#FF8C00"
+                else:
+                    sig_badge = f'<span class="badge-fair">{stype}</span>'
+                    act_col = "#FFFFFF"
+
+                live_dot = '<span style="color: #00E676; font-weight: 900; margin-right: 6px;">●</span>' if a.get("is_active_bar") else ""
+
                 row_html = (
                     f'<tr>'
-                    f'<td style="color: #A1A1AA; font-size: 12.5px;">{a["timestamp"]}</td>'
-                    f'<td style="font-weight: 800; color: #FFFFFF;">{a["ticker"]}</td>'
-                    f'<td style="font-weight: 800; color: {sig_col};">{a["signal_type"]}</td>'
-                    f'<td style="font-weight: 700; color: #00E676;">{a["action"]}</td>'
+                    f'<td style="color: #E4E4E7; font-size: 13px; font-weight: 700;">{live_dot}{a["timestamp_uk"]}</td>'
+                    f'<td style="font-weight: 800; color: #FFFFFF; font-size: 14px;">{a["ticker"]} <span style="color: #9CA3AF; font-weight: 500; font-size: 12px; margin-left: 4px;">{a["name"]}</span></td>'
+                    f'<td style="text-align: center;">{sig_badge}</td>'
+                    f'<td style="font-weight: 800; color: {act_col};">{a["action"]}</td>'
                     f'<td style="font-weight: 700; color: #FFFFFF;">{px_val}</td>'
-                    f'<td style="color: #A1A1AA;">{a["timeframe"]}</td>'
-                    f'<td style="font-family: monospace; font-size: 12px; color: #D4D4D8;">{a["raw_message"]}</td>'
+                    f'<td style="font-weight: 700; color: {ret_col};">{ret_str}</td>'
+                    f'<td style="color: #D4D4D8; font-size: 12.5px;">{a["raw_message"]}</td>'
                     f'</tr>'
                 )
                 rows.append(row_html)
@@ -880,13 +952,13 @@ def render_live_dashboard():
                 f'<table class="tid-table">'
                 f'<thead>'
                 f'<tr>'
-                f'<th>TIMESTAMP</th>'
+                f'<th>DATE &amp; TIME (UK)</th>'
                 f'<th>TICKER</th>'
-                f'<th>SIGNAL TYPE</th>'
+                f'<th style="text-align: center;">SIGNAL TYPE</th>'
                 f'<th>ACTION</th>'
-                f'<th>PRICE</th>'
-                f'<th>TIMEFRAME</th>'
-                f'<th>RAW MESSAGE</th>'
+                f'<th>SIGNAL PRICE</th>'
+                f'<th>SINCE SIGNAL</th>'
+                f'<th>SIGNAL METRICS (1D)</th>'
                 f'</tr>'
                 f'</thead>'
                 f'<tbody>{body_html}</tbody>'
@@ -894,12 +966,8 @@ def render_live_dashboard():
                 f'</div>'
             )
             st.markdown(alert_table_html, unsafe_allow_html=True)
-
-            if st.button("🗑️ Clear Alert History"):
-                clear_alerts()
-                st.rerun()
         else:
-            st.info("No incoming alerts logged yet. Webhook listener is waiting on port 8000. When TradingView triggers an alert, it will immediately appear here.")
+            st.info("No matching Confirmed Buy or Ghost Capitulation signals found for the selected filter.")
 
 # Run the live auto-refreshing dashboard
 render_live_dashboard()
