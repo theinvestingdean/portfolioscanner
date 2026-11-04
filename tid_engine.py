@@ -237,7 +237,8 @@ def _is_session_still_open(sig_ts: pd.Timestamp, market: str) -> bool:
 
 def compute_technical_indicators(
     df: pd.DataFrame,
-    er_bar_dates: Optional[Set] = None
+    er_bar_dates: Optional[Set] = None,
+    market: str = "NASDAQ"
 ) -> pd.DataFrame:
     """
     Calculates exact 1:1 Pine Script indicators matching:
@@ -255,9 +256,9 @@ def compute_technical_indicators(
     n = len(df)
     er_dates = er_bar_dates or set()
 
-    # 1. SMAs & Raw 50-Day Standard Deviation (confLen = 50, confMult = 2.2)
+    # 1. SMAs & Raw 50-Day Standard Deviation (confLen = 50, confMult = 2.2, ddof=1 matches Pine ta.stdev)
     df["SMA50"] = c.rolling(50).mean()
-    df["STDEV50"] = c.rolling(50).std(ddof=0)
+    df["STDEV50"] = c.rolling(50).std(ddof=1)
     df["ZScore"] = (c - df["SMA50"]) / df["STDEV50"].replace(0, np.nan)
     df["ZScoreLow"] = (l - df["SMA50"]) / df["STDEV50"].replace(0, np.nan)
     df["SMA200"] = c.rolling(200).mean()
@@ -404,6 +405,7 @@ def compute_technical_indicators(
     min_bars_between = 10
 
     min_z6 = eff_z_low.rolling(6).min()
+    min_z_close6 = eff_z_close.rolling(6).min()
     min_rsi6 = df["RSI14"].rolling(6).min()
     lowest_low6 = l.rolling(6).min()
     pierced_lower6 = ((l - df["ConfLower"]).rolling(6).min() <= (df["ATR14"] * 0.20)) | (min_z6 <= buy_sigma_thresh)
@@ -417,11 +419,15 @@ def compute_technical_indicators(
     bull_pa = ((c > o) & (c > prev_close)) | ((lower_wick >= 0.55) & (c > prev_close) & is_vol_spike)
     bull_mom = (z_slope > 0) & (df["RSIFast"] > df["RSIFast"].shift(1))
     knife_guard_ok = (bars_since_bear_flip > 4) | (min_z6 <= -2.3) | (l <= (df["ConfLower"] - df["ATR14"] * 0.3))
+
+    # High-Win% Trend Filter on Buys (IA_Optimized_Trend.pine line 292):
+    # If the ribbon is Orange and falling steeply (slope <= -0.35), require an actual
+    # touch/pierce of the lower band or deep -2.0 Sigma stretch on close.
     trend_buy_ok = (
         df["IsBull"]
         | (df["RibbonSlope"] > -0.35)
         | (lowest_low6 <= (df["ConfLower"] + df["ATR14"] * 0.05))
-        | (min_z6 <= -2.0)
+        | (min_z_close6 <= -2.0)
     )
 
     cand_buy = pierced_lower6 & ((min_rsi6 <= buy_rsi_limit) | (min_z6 <= -2.1)) & bull_pa & bull_mom & knife_guard_ok & trend_buy_ok
@@ -449,7 +455,9 @@ def compute_technical_indicators(
 
         cb = False
         er_warn = False
-        if bool(cand_buy.iloc[i]):
+        # Confirmed Buy requires confirmed candle close (TradingView barstate.isconfirmed / session close)
+        is_live_last_bar = (i == n - 1) and _is_session_still_open(df.index[i], market)
+        if bool(cand_buy.iloc[i]) and not is_live_last_bar:
             atr_i = float(df["ATR14"].iloc[i]) if not np.isnan(df["ATR14"].iloc[i]) else 0.0
             deeper_flush = (
                 (i - last_conf_bar >= 4)
@@ -641,7 +649,7 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
                 continue
 
             er_dates = _map_tv_earnings_bar_dates(er_raw_map.get(sym), df.index)
-            df = compute_technical_indicators(df, er_bar_dates=er_dates)
+            df = compute_technical_indicators(df, er_bar_dates=er_dates, market=item["market"])
 
             # Latest bar values
             last = df.iloc[-1]
