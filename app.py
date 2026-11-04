@@ -916,7 +916,7 @@ def render_live_dashboard():
                 cur_val = f"${a['current_price']:,.2f}" if a["current_price"] >= 100 else f"${a['current_price']:.2f}"
                 ret_pct = a.get("return_pct", 0.0)
                 ret_col = "#00E676" if ret_pct > 0 else ("#FF5252" if ret_pct < 0 else "#A1A1AA")
-                ret_str = "ACTIVE BAR" if a.get("is_active_bar") else f"{ret_pct:+.1f}% ({cur_val})"
+                ret_str = "LIVE BAR" if a.get("is_active_bar") else f"{ret_pct:+.1f}% ({cur_val})"
                 if a.get("is_active_bar"):
                     ret_col = "#FACC15"
 
