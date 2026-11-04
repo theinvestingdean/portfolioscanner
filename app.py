@@ -503,6 +503,50 @@ st.markdown("""
         border: 1px solid #27272A;
     }
 
+    /* Compact Institutional 4-Card Signal Scorecard Strip */
+    .tid-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin: 6px 0 16px 0;
+    }
+    @media (max-width: 960px) {
+        .tid-kpi-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    .tid-kpi-card {
+        background: linear-gradient(180deg, #16161A 0%, #101013 100%);
+        border: 1px solid #2E2E36;
+        border-top: 2.5px solid #FACC15;
+        border-radius: 7px;
+        padding: 11px 15px;
+    }
+    .tid-kpi-label {
+        color: #A1A1AA;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.7px;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+    }
+    .tid-kpi-value {
+        color: #FFFFFF;
+        font-size: 1.32rem;
+        font-weight: 900;
+        line-height: 1.2;
+        letter-spacing: -0.3px;
+    }
+    .tid-kpi-sub {
+        color: #A1A1AA;
+        font-size: 12px;
+        font-weight: 600;
+        margin-top: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
     /* =========================================================================
        TACTICAL ACTION GUIDE - FORCED EXACT 1-LINE FIT (NO WRAPPING)
        ========================================================================= */
@@ -882,17 +926,31 @@ def render_live_dashboard():
                 st.cache_data.clear()
                 st.rerun()
 
-        # Filters: Signal Type + Ticker (A-Z)
-        f_col1, f_col2 = st.columns([1, 1])
+        # 3-Column Filter Bar: Lookback Window (Default: Last 7 Trading Days) + Signal Type + Ticker (A-Z)
+        LOOKBACK_MAP = {
+            "Last 7 Trading Days": "7D",
+            "Last 1 Month": "1M",
+            "Last 3 Months": "3M",
+            "Last 1 Year": "1Y",
+            "Full 2 Years": "2Y",
+        }
+        f_col1, f_col2, f_col3 = st.columns([1.05, 1.25, 0.95])
         with f_col1:
+            lookback_choice = st.selectbox(
+                "Lookback Window:",
+                options=list(LOOKBACK_MAP.keys()),
+                index=0
+            )
+        with f_col2:
             sig_type_choice = st.selectbox(
                 "Filter by Signal Type:",
                 options=["ALL SIGNALS (Confirmed + Ghost Cap)", "CONFIRMED BUY ONLY", "GHOST CAP ONLY"]
             )
-        with f_col2:
+        with f_col3:
             alphabetical_tickers = sorted(list(set([t["display"] for t in portfolio_data])))
             filter_ticker = st.selectbox("Filter by Ticker (A-Z):", options=["ALL"] + alphabetical_tickers)
 
+        lookback_arg = LOOKBACK_MAP[lookback_choice]
         if sig_type_choice == "CONFIRMED BUY ONLY":
             sig_filter_arg = "CONFIRMED BUY"
         elif sig_type_choice == "GHOST CAP ONLY":
@@ -900,16 +958,71 @@ def render_live_dashboard():
         else:
             sig_filter_arg = "ALL"
 
-        webhook_rows = get_recent_alerts(limit=50, ticker=None if filter_ticker == "ALL" else filter_ticker)
+        webhook_rows = get_recent_alerts(limit=100, ticker=None if filter_ticker == "ALL" else filter_ticker)
         signal_log = build_optimised_trend_signal_log(
             portfolio_data=portfolio_data,
             webhook_alerts=webhook_rows,
             ticker_filter=filter_ticker,
             signal_filter=sig_filter_arg,
-            limit=100
+            lookback_window=lookback_arg,
+            limit=1000
         )
 
         if signal_log:
+            # ----------------------------------------------------------------
+            # Compact Institutional 4-Card Signal Scorecard Strip
+            # ----------------------------------------------------------------
+            total_sigs = len(signal_log)
+            conf_sigs_cnt = sum(1 for s in signal_log if "CONFIRMED BUY" in s.get("signal_type", ""))
+            ghost_sigs_cnt = sum(1 for s in signal_log if "GHOST" in s.get("signal_type", ""))
+
+            eval_sigs = [s for s in signal_log if not s.get("is_active_bar")] or signal_log
+            wins_cnt = sum(1 for s in eval_sigs if s.get("return_pct", 0.0) > 0)
+            win_rate = (wins_cnt / len(eval_sigs)) * 100.0 if eval_sigs else 0.0
+            win_col = "#00E676" if win_rate >= 55.0 else ("#FACC15" if win_rate >= 40.0 else "#FF5252")
+
+            avg_ret = sum(s.get("return_pct", 0.0) for s in eval_sigs) / len(eval_sigs) if eval_sigs else 0.0
+            avg_ret_col = "#00E676" if avg_ret > 0 else ("#FF5252" if avg_ret < 0 else "#FFFFFF")
+
+            dca_vals = [float(s["signal_dca"]) for s in signal_log if s.get("signal_dca") is not None]
+            avg_sig_dca = (sum(dca_vals) / len(dca_vals)) if dca_vals else 0.0
+
+            best_sig = max(eval_sigs, key=lambda x: x.get("return_pct", -9999.0))
+            best_ret = best_sig.get("return_pct", 0.0)
+            best_col = "#00E676" if best_ret > 0 else ("#FF5252" if best_ret < 0 else "#FFFFFF")
+            best_type_lbl = "Confirmed" if "CONFIRMED" in best_sig.get("signal_type", "") else "Ghost Cap"
+            best_date_lbl = str(best_sig.get("timestamp_uk", "")).split(",")[0]
+
+            scorecard_html = (
+                f'<div class="tid-kpi-grid">'
+                f'<div class="tid-kpi-card">'
+                f'<div class="tid-kpi-label">Signals ({lookback_choice})</div>'
+                f'<div class="tid-kpi-value">{total_sigs} Logged</div>'
+                f'<div class="tid-kpi-sub">'
+                f'<span style="color: #00E676; font-weight: 700;">{conf_sigs_cnt} Confirmed</span>'
+                f' &bull; '
+                f'<span style="color: #FF8C00; font-weight: 700;">{ghost_sigs_cnt} Ghost Cap</span>'
+                f'</div>'
+                f'</div>'
+                f'<div class="tid-kpi-card">'
+                f'<div class="tid-kpi-label">Win Rate (% In Profit)</div>'
+                f'<div class="tid-kpi-value" style="color: {win_col};">{win_rate:.1f}%</div>'
+                f'<div class="tid-kpi-sub">{wins_cnt} of {len(eval_sigs)} signals currently green</div>'
+                f'</div>'
+                f'<div class="tid-kpi-card">'
+                f'<div class="tid-kpi-label">Avg Return Since Signal</div>'
+                f'<div class="tid-kpi-value" style="color: {avg_ret_col};">{avg_ret:+.1f}%</div>'
+                f'<div class="tid-kpi-sub">Avg DCA at Signal: <span style="color: #FACC15; font-weight: 800;">{avg_sig_dca:.1f} / 10</span></div>'
+                f'</div>'
+                f'<div class="tid-kpi-card">'
+                f'<div class="tid-kpi-label">Top Signal In Window</div>'
+                f'<div class="tid-kpi-value">{best_sig["ticker"]} <span style="color: {best_col};">{best_ret:+.1f}%</span></div>'
+                f'<div class="tid-kpi-sub">{best_date_lbl} &bull; {best_type_lbl}</div>'
+                f'</div>'
+                f'</div>'
+            )
+            st.markdown(scorecard_html, unsafe_allow_html=True)
+
             rows = []
             for a in signal_log:
                 px_val = f"${a['price']:,.2f}" if a["price"] >= 100 else (f"${a['price']:.2f}" if a["price"] else "N/A")
@@ -919,6 +1032,16 @@ def render_live_dashboard():
                 ret_str = "LIVE BAR" if a.get("is_active_bar") else f"{ret_pct:+.1f}% ({cur_val})"
                 if a.get("is_active_bar"):
                     ret_col = "#FACC15"
+
+                sig_dca = a.get("signal_dca")
+                if sig_dca is not None:
+                    sdca_cls = (
+                        "dca-pill-8" if sig_dca >= 8.0
+                        else ("dca-pill-6" if sig_dca >= 6.0 else ("dca-pill-4" if sig_dca >= 4.5 else "dca-pill-low"))
+                    )
+                    dca_cell = f'<span class="{sdca_cls}">{sig_dca:.1f}</span>'
+                else:
+                    dca_cell = '<span style="color: #9CA3AF;">—</span>'
 
                 stype = a["signal_type"]
                 if "CONFIRMED BUY" in stype:
@@ -937,6 +1060,7 @@ def render_live_dashboard():
                     f'<tr>'
                     f'<td style="color: #E4E4E7; font-size: 13px; font-weight: 700;">{live_dot}{a["timestamp_uk"]}</td>'
                     f'<td style="font-weight: 800; color: #FFFFFF; font-size: 14px;">{a["ticker"]} <span style="color: #9CA3AF; font-weight: 500; font-size: 12px; margin-left: 4px;">{a["name"]}</span></td>'
+                    f'<td style="text-align: center;">{dca_cell}</td>'
                     f'<td style="text-align: center;">{sig_badge}</td>'
                     f'<td style="font-weight: 800; color: {act_col};">{a["action"]}</td>'
                     f'<td style="font-weight: 700; color: #FFFFFF;">{px_val}</td>'
@@ -954,6 +1078,7 @@ def render_live_dashboard():
                 f'<tr>'
                 f'<th>DATE &amp; TIME (UK)</th>'
                 f'<th>TICKER</th>'
+                f'<th style="text-align: center;">SIGNAL DCA</th>'
                 f'<th style="text-align: center;">SIGNAL TYPE</th>'
                 f'<th>ACTION</th>'
                 f'<th>SIGNAL PRICE</th>'
@@ -967,7 +1092,10 @@ def render_live_dashboard():
             )
             st.markdown(alert_table_html, unsafe_allow_html=True)
         else:
-            st.info("No matching Confirmed Buy or Ghost Capitulation signals found for the selected filter.")
+            st.info(
+                f"No Confirmed Buy or Ghost Capitulation signals fired in '{lookback_choice}' for this filter. "
+                "Switch 'Lookback Window' to Last 1 Month, Last 1 Year, or Full 2 Years to inspect historical signals."
+            )
 
 # Run the live auto-refreshing dashboard
 render_live_dashboard()

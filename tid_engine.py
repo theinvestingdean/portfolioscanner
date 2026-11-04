@@ -601,9 +601,9 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
     """Fetches and computes full metrics for all 17 portfolio tickers, matching TradingView 1:1."""
     symbols = [t["symbol"] for t in PORTFOLIO_TICKERS]
 
-    # Download 2y unadjusted daily batch data (split-adjusted, non-dividend-adjusted — matches TradingView charts
-    # and provides full 200-SMA / 100-bar ATR regime warmup across the entire 1Y signal log)
-    batch = yf.download(symbols, period="2y", auto_adjust=False, group_by="ticker", threads=True, progress=False)
+    # Download 3y unadjusted daily batch data (split-adjusted, non-dividend-adjusted — matches TradingView charts
+    # and provides full 200-SMA / 100-bar ATR regime warmup across the entire 2-Year signal log)
+    batch = yf.download(symbols, period="3y", auto_adjust=False, group_by="ticker", threads=True, progress=False)
 
     # Download 60d 15m intraday batch data to pinpoint exact UK time of Ghost Cap / Confirmed Buy flashes
     intra_batch = None
@@ -624,7 +624,7 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
             if len(symbols) > 1 and sym in batch:
                 df_raw = batch[sym]
             else:
-                df_raw = yf.Ticker(sym).history(period="2y", auto_adjust=False)
+                df_raw = yf.Ticker(sym).history(period="3y", auto_adjust=False)
 
             df_intra = None
             if intra_batch is not None:
@@ -716,9 +716,12 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
             else:
                 status = "WAIT"
 
-            # Restrict reported signal log & Ghost Cap recency to the trailing 1-year window
-            one_year_cutoff = df.index[-1].date() - timedelta(days=365)
+            # Keep Tab 1 Ghost Cap recency within trailing 1Y, while storing full 2-Year signal log for Tab 2
+            latest_bar_date = df.index[-1].date()
+            one_year_cutoff = latest_bar_date - timedelta(days=365)
+            two_year_cutoff = latest_bar_date - timedelta(days=731)
             df_1y = df[[ts.date() >= one_year_cutoff for ts in df.index]]
+            df_2y = df[[ts.date() >= two_year_cutoff for ts in df.index]]
 
             ghost_rows = df_1y[df_1y["GhostBuy"]]
             if not ghost_rows.empty:
@@ -726,16 +729,17 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
                 _, last_ghost_short, last_ghost_full = _resolve_uk_signal_time(
                     df, df_intra, last_gb_ts, sig_type="GHOST", market=item["market"]
                 )
-                last_ghost_days_ago = (df.index[-1].date() - last_gb_ts.date()).days
+                last_ghost_days_ago = (latest_bar_date - last_gb_ts.date()).days
             else:
                 last_ghost_short = "—"
                 last_ghost_full = "No Ghost Cap (1Y)"
                 last_ghost_days_ago = 9999
 
-            # Collect Confirmed Buy & Ghost Cap events across the 1Y window for the Optimised Trend Alert Log
+            # Collect Confirmed Buy & Ghost Cap events across the 2Y window for the Optimised Trend Alert Log
             signal_events = []
-            sig_mask = df_1y["ConfBuy"] | df_1y["GhostBuy"]
-            for sig_ts, srow in df_1y[sig_mask].iterrows():
+            total_bars = len(df)
+            sig_mask = df_2y["ConfBuy"] | df_2y["GhostBuy"]
+            for sig_ts, srow in df_2y[sig_mask].iterrows():
                 is_conf = bool(srow["ConfBuy"])
                 stype = "CONFIRMED BUY" if is_conf else "GHOST CAP"
                 s_mode = "CONFIRMED" if is_conf else "GHOST"
@@ -745,6 +749,24 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
                 sig_px = float(srow["Close"])
                 sig_z = float(srow["ZScore"]) if not np.isnan(srow["ZScore"]) else 0.0
                 sig_rsi = float(srow["RSI14"]) if not np.isnan(srow["RSI14"]) else 50.0
+
+                # Exact 3-Pillar DCA Score at the time the signal fired
+                sig_has50 = not np.isnan(srow["SMA50"])
+                sig_has200 = not np.isnan(srow["SMA200"])
+                sig_d50 = float(srow["Dist50"]) if sig_has50 else 0.0
+                sig_d200 = float(srow["Dist200"]) if sig_has200 else 0.0
+                sig_dca = round(
+                    (f_score_z(sig_z) * 0.40)
+                    + (f_score_rsi(sig_rsi) * 0.30)
+                    + (f_score_sma(sig_d50, sig_d200, sig_has50, sig_has200) * 0.30),
+                    1,
+                )
+                sig_dca = max(1.0, min(10.0, sig_dca))
+
+                bar_loc = df.index.get_loc(sig_ts)
+                bars_ago = int((total_bars - 1) - bar_loc) if isinstance(bar_loc, int) else 9999
+                cal_days_ago = int((latest_bar_date - sig_ts.date()).days)
+
                 ret_pct = ((price - sig_px) / sig_px) * 100.0 if sig_px > 0 else 0.0
                 if is_conf:
                     action_lbl = "PRIMARY BUY"
@@ -767,8 +789,11 @@ def fetch_portfolio_data() -> List[Dict[str, Any]]:
                     "price": sig_px,
                     "current_price": price,
                     "return_pct": ret_pct,
+                    "signal_dca": sig_dca,
                     "std_dev": sig_z,
                     "rsi": sig_rsi,
+                    "trading_bars_ago": bars_ago,
+                    "calendar_days_ago": cal_days_ago,
                     "timeframe": "1D",
                     "raw_message": summary_msg,
                     "is_active_bar": is_live_candle,
@@ -868,15 +893,17 @@ def build_optimised_trend_signal_log(
     webhook_alerts: Optional[List[Dict[str, Any]]] = None,
     ticker_filter: Optional[str] = None,
     signal_filter: str = "ALL",
-    limit: int = 100
+    lookback_window: str = "7D",
+    limit: int = 1000
 ) -> List[Dict[str, Any]]:
     """
     Combines automatically detected Confirmed Buy & Ghost Cap signals across all 17 stocks
-    with any logged TradingView webhook alerts, formatted in UK Time (Europe/London)
-    and sorted newest-first.
+    with any logged TradingView webhook alerts, filtered by Lookback Window ('7D', '1M',
+    '3M', '1Y', '2Y'), Signal Type, and Ticker, formatted in UK Time and sorted newest-first.
     """
     combined: List[Dict[str, Any]] = []
     seen_keys = set()
+    now_uk_date = datetime.now(UK_TZ).date()
 
     for item in portfolio_data:
         for ev in item.get("signal_events", []):
@@ -888,6 +915,7 @@ def build_optimised_trend_signal_log(
     if webhook_alerts:
         price_lookup = {x["display"]: x["price"] for x in portfolio_data}
         name_lookup = {x["display"]: x["name"] for x in portfolio_data}
+        dca_lookup = {x["display"]: x["dca_score"] for x in portfolio_data}
         for wa in webhook_alerts:
             tkr = str(wa.get("ticker", "")).upper()
             stype = str(wa.get("signal_type", "ALERT")).upper()
@@ -898,10 +926,12 @@ def build_optimised_trend_signal_log(
                 date_key = dt_uk.strftime("%Y-%m-%d")
                 uk_full = dt_uk.strftime("%d %b %Y, %H:%M %Z")
                 sort_ep = dt_uk.timestamp()
+                cal_days = max(0, (now_uk_date - dt_uk.date()).days)
             except Exception:
                 date_key = raw_ts[:10]
                 uk_full = raw_ts
                 sort_ep = 0.0
+                cal_days = 9999
 
             key = (tkr, date_key, stype)
             if key in seen_keys:
@@ -923,12 +953,31 @@ def build_optimised_trend_signal_log(
                 "price": sig_px,
                 "current_price": cur_px,
                 "return_pct": ret_pct,
+                "signal_dca": dca_lookup.get(tkr),
                 "std_dev": None,
                 "rsi": None,
+                "trading_bars_ago": None,
+                "calendar_days_ago": cal_days,
                 "timeframe": str(wa.get("timeframe", "1D")),
                 "raw_message": str(wa.get("raw_message", "")),
                 "is_active_bar": False,
             })
+
+    # Filter by Lookback Window
+    if lookback_window == "7D":
+        combined = [
+            x for x in combined
+            if (x.get("trading_bars_ago") is not None and x["trading_bars_ago"] <= 6)
+            or (x.get("trading_bars_ago") is None and x.get("calendar_days_ago", 9999) <= 10)
+        ]
+    elif lookback_window == "1M":
+        combined = [x for x in combined if x.get("calendar_days_ago", 9999) <= 31]
+    elif lookback_window == "3M":
+        combined = [x for x in combined if x.get("calendar_days_ago", 9999) <= 92]
+    elif lookback_window == "1Y":
+        combined = [x for x in combined if x.get("calendar_days_ago", 9999) <= 365]
+    elif lookback_window == "2Y":
+        combined = [x for x in combined if x.get("calendar_days_ago", 9999) <= 731]
 
     if ticker_filter and ticker_filter != "ALL":
         combined = [x for x in combined if x["ticker"] == ticker_filter]
